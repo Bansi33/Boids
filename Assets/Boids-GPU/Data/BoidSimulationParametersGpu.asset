@@ -1,0 +1,27 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: cbe28c98495653d4abfc705d4ffef8bd, type: 3}
+  m_Name: BoidSimulationParametersGpu
+  m_EditorClassIdentifier: 
+  InitialSpeed: 4
+  MinSpeed: 2
+  MaxSpeed: 8
+  MinNeighborDistance: 3
+  NeighborFov: 90
+  SimulationBoxSize: 20
+  SimulationSpaceEdgeEffectDistance: 3
+  WallWeight: 1
+  AllignmentWeight: 4
+  CohesionWeight: 4
+  SeparationWeight: 8
+  TargetAttractionWeight: 2
+  ObstacleRejectionWeight: 12

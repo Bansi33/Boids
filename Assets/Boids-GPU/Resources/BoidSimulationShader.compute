@@ -1,0 +1,307 @@
+﻿#pragma kernel CSMain
+
+static const int numberOfThreads = 8;
+
+struct BoidInfo
+{
+	float3 Position;
+	float3 Acceleration;
+	float3 Velocity;
+};
+
+struct TargetInfo
+{
+	float3 Position;
+	float AttractionRadiusSqrd; // Larger radius which attracts boids
+	float CoreRadiusSqrd; // Smaller radius in which attraction is not working
+};
+
+struct ObstacleInfo
+{
+	float3 Position;
+	float RadiusSqrd;
+};
+
+struct SimulationSpaceBounds
+{
+	float minX;
+	float maxX;
+	float minY;
+	float maxY;
+	float minZ;
+	float maxZ;
+};
+
+RWStructuredBuffer<int> neighbors; // Array of integers determining if some boid is neighbor with another or not
+RWStructuredBuffer<BoidInfo> boids;
+RWStructuredBuffer<TargetInfo> targets;
+RWStructuredBuffer<ObstacleInfo> obstacles;
+RWStructuredBuffer< SimulationSpaceBounds> simulationBounds;
+
+int totalNumberOfBoids;
+int numberOfBoidsX;
+int numberOfBoidsY;
+int numberOfBoidsZ;
+
+float minSpeed;
+float maxSpeed;
+float minNeighborDistance;
+float neighborViewThreshold;
+
+float simulationSpaceEdgeEffectDistance;
+
+float wallWeight;
+float allignmentWeight;
+float cohesionWeight;
+float separationWeight;
+
+float targetAttractionWeight;
+float obstacleRejectionWeight;
+float deltaTime;
+
+int targetsCount;
+int obstaclesCount;
+
+
+void UpdateNeighbors(int boidIndex, int neighborsStartIndex, int neighborsEndIndex) 
+{
+	BoidInfo thisBoid = boids[boidIndex];
+
+	for (int i = 0; i < totalNumberOfBoids; i++) 
+	{
+		if (i == boidIndex)
+		{
+			continue;
+		}
+
+		BoidInfo potentialNeighbor = boids[i];
+
+		float3 directionToBoid = potentialNeighbor.Position - thisBoid.Position;
+		float distance = length(directionToBoid);
+
+		if (distance < minNeighborDistance)
+		{
+			float3 directionNormalized = normalize(directionToBoid);
+			float3 forward = normalize(thisBoid.Velocity);
+			float angleBetween = dot(forward, directionNormalized);
+
+			if (angleBetween > neighborViewThreshold)
+			{
+				neighbors[neighborsStartIndex + i] = 1;
+			}
+		}
+	}
+}
+
+float3 CalculateAccelerationAgainstWall(float distance, float3 directionToAvoidWall)
+{
+	if (distance < simulationSpaceEdgeEffectDistance)
+	{
+		return directionToAvoidWall * (wallWeight / abs(distance / simulationSpaceEdgeEffectDistance));
+	}
+
+	return float3(0,0,0);
+}
+
+float3 UpdateSimulationSpace(float3 position, float3 acceleration)
+{
+	acceleration +=
+		CalculateAccelerationAgainstWall(simulationBounds[0].minX - position.x, float3(1,0,0)) +
+		CalculateAccelerationAgainstWall(simulationBounds[0].minY - position.y, float3(0, 1, 0)) +
+		CalculateAccelerationAgainstWall(simulationBounds[0].minZ - position.z, float3(0, 0, 1)) +
+		CalculateAccelerationAgainstWall(simulationBounds[0].maxX - position.x, float3(-1, 0, 0)) +
+		CalculateAccelerationAgainstWall(simulationBounds[0].maxY - position.y, float3(0, -1, 0)) +
+		CalculateAccelerationAgainstWall(simulationBounds[0].maxZ - position.z, float3(0, 0, -1));
+
+	return acceleration;
+}
+
+BoidInfo UpdateMove(BoidInfo thisBoid, float3 position, float3 velocity, float3 acceleration)
+{
+	velocity += acceleration * deltaTime;
+
+	float3 direction = normalize(velocity);
+	float speed = length(velocity);
+
+	velocity = clamp(speed, minSpeed, maxSpeed) * direction;
+	position += velocity * deltaTime;
+
+	thisBoid.Acceleration = acceleration;
+	thisBoid.Velocity = velocity;
+	thisBoid.Position = position;
+
+	return thisBoid;
+}
+
+void ClearNeighbors(int boidIndex, int neighborsStartIndex, int neighborsEndIndex)
+{
+	for (int i = neighborsStartIndex; i < neighborsEndIndex; i++)
+	{
+		neighbors[i] = 0;
+	}
+}
+
+float3 UpdateSeparation(int boidIndex, float3 position, float3 acceleration, int neighborsStartIndex, int neighborsEndIndex)
+{
+	float3 separationForce = float3(0,0,0);
+	int numberOfNeighbors = 0;
+	for(int i = neighborsStartIndex; i < neighborsEndIndex; i++)
+	{
+		// Checking if this two boids are neighbors
+		if (neighbors[i] == 0 || boidIndex == i) 
+		{
+			continue;
+		}
+
+		BoidInfo neighbor = boids[i - neighborsStartIndex];
+		separationForce += normalize(position - neighbor.Position);
+		numberOfNeighbors++;
+	}
+
+	if (numberOfNeighbors == 0) 
+	{
+		return acceleration;
+	}
+
+	separationForce /= numberOfNeighbors;
+	acceleration += separationForce * separationWeight;
+
+	return acceleration;
+}
+
+float3 UpdateAllignment(int boidIndex, float3 velocity, float3 acceleration, int neighborsStartIndex, int neighborsEndIndex)
+{
+	float3 averageVelocity = float3(0, 0, 0);
+	int numberOfNeighbors = 0;
+	for (int i = neighborsStartIndex; i < neighborsEndIndex; i++)
+	{
+		// Checking if this two boids are neighbors
+		if (neighbors[i] == 0 || boidIndex == i)
+		{
+			continue;
+		}
+
+		BoidInfo neighbor = boids[i - neighborsStartIndex];
+		averageVelocity += neighbor.Velocity;
+		numberOfNeighbors++;
+	}
+
+	if (numberOfNeighbors == 0)
+	{
+		return acceleration;
+	}
+
+	averageVelocity /= numberOfNeighbors;
+	acceleration += (averageVelocity - velocity) * allignmentWeight;
+
+	return acceleration;
+}
+
+float3 UpdateCohesion(int boidIndex, float3 position, float3 acceleration, int neighborsStartIndex, int neighborsEndIndex)
+{
+	float3 averagePosition = float3(0, 0, 0);
+	int numberOfNeighbors = 0;
+	for (int i = neighborsStartIndex; i < neighborsEndIndex; i++)
+	{
+		// Checking if this two boids are neighbors
+		if (neighbors[i] == 0 || boidIndex == i)
+		{
+			continue;
+		}
+
+		BoidInfo neighbor = boids[i - neighborsStartIndex];
+		averagePosition += neighbor.Position;
+		numberOfNeighbors++;
+	}
+
+	if (numberOfNeighbors == 0)
+	{
+		return acceleration;
+	}
+
+	averagePosition /= numberOfNeighbors;
+	acceleration += (averagePosition - position) * cohesionWeight;
+
+	return acceleration;
+}
+
+float3 UpdateTargetsAttraction(float3 position, float3 acceleration)
+{
+	for(int i = 0; i < targetsCount; i++)
+	{
+		TargetInfo targetInfo = targets[i];
+
+		float3 directionTowardsTarget = targetInfo.Position - position;
+		float sqrdDistanceFromTarget = dot(directionTowardsTarget, directionTowardsTarget);
+
+		if (sqrdDistanceFromTarget < targetInfo.AttractionRadiusSqrd &&
+			sqrdDistanceFromTarget > targetInfo.CoreRadiusSqrd)
+		{
+			// Boid is in attraction range from target, but not too close to be in it's core
+			acceleration += directionTowardsTarget * (targetAttractionWeight * abs(sqrdDistanceFromTarget / targetInfo.AttractionRadiusSqrd));
+		}
+	}
+
+	return acceleration;
+}
+
+float3 UpdateObstaclesRejection(float3 position, float3 acceleration) 
+{
+	int firstObstacleDetected = 0;
+
+	for (int i = 0; i < obstaclesCount; i++) 
+	{
+		ObstacleInfo obstacle = obstacles[i];
+
+		float3 directionAwayFromObstacle = position - obstacle.Position;
+		float sqrdDistanceFromObstacle = dot(directionAwayFromObstacle, directionAwayFromObstacle);
+
+		if (sqrdDistanceFromObstacle < obstacle.RadiusSqrd)
+		{
+			if (firstObstacleDetected == 0) 
+			{
+				acceleration = float3(0, 0, 0);
+			}
+
+			firstObstacleDetected = 1;
+
+			acceleration += directionAwayFromObstacle * (obstacleRejectionWeight / abs(sqrdDistanceFromObstacle));
+		}
+	}
+
+	return acceleration;
+}
+
+[numthreads(numberOfThreads, numberOfThreads, numberOfThreads)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+	if (id.x > (numberOfBoidsX - 1) || id.y > (numberOfBoidsY - 1) || id.z > (numberOfBoidsZ - 1))
+	{
+		return;
+	}
+
+	int boidIndex = id.x + id.y * numberOfBoidsX + id.z * numberOfBoidsX * numberOfBoidsY;
+	int neighborsStartIndex = boidIndex * totalNumberOfBoids;
+	int neighborsEndIndex = neighborsStartIndex + totalNumberOfBoids;
+
+	BoidInfo thisBoid = boids[boidIndex];
+	float3 acceleration = float3(0,0,0);
+	float3 velocity = thisBoid.Velocity;
+	float3 position = thisBoid.Position;
+
+	UpdateNeighbors(boidIndex, neighborsStartIndex, neighborsEndIndex);
+
+	acceleration = UpdateSeparation(boidIndex, position, acceleration, neighborsStartIndex, neighborsEndIndex);
+	acceleration = UpdateAllignment(boidIndex, velocity, acceleration, neighborsStartIndex, neighborsEndIndex);
+	acceleration = UpdateCohesion(boidIndex, position, acceleration, neighborsStartIndex, neighborsEndIndex);
+
+	acceleration = UpdateTargetsAttraction(position, acceleration);
+	acceleration = UpdateObstaclesRejection(position, acceleration);
+
+	acceleration = UpdateSimulationSpace(position, acceleration);
+
+	thisBoid = UpdateMove(thisBoid, position, velocity, acceleration);
+	boids[boidIndex] = thisBoid;
+
+	ClearNeighbors(boidIndex, neighborsStartIndex, neighborsEndIndex);
+}
